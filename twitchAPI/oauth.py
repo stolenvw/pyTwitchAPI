@@ -69,14 +69,16 @@ __all__ = ['refresh_access_token', 'validate_token', 'get_user_info', 'revoke_to
 async def refresh_access_token(refresh_token: str,
                                app_id: str,
                                app_secret: str,
-                               session: Optional[aiohttp.ClientSession] = None):
+                               session: Optional[aiohttp.ClientSession] = None,
+                               expires_in: Optional[bool] = False):
     """Simple helper function for refreshing a user access token.
 
     :param str refresh_token: the current refresh_token
     :param str app_id: the id of your app
     :param str app_secret: the secret key of your app
     :param ~aiohttp.ClientSession session: optionally a active client session to be used for the web request to avoid having to open a new one
-    :return: access_token, refresh_token
+    :param expires_in: optional bool to return expires in time for token
+    :return: access_token, refresh_token, expires_in (Optional)
     :raises ~twitchAPI.types.InvalidRefreshTokenException: if refresh token is invalid
     :raises ~twitchAPI.types.UnauthorizedException: if both refresh and access token are invalid (eg if the user changes
                 their password of the app gets disconnected)
@@ -98,7 +100,10 @@ async def refresh_access_token(refresh_token: str,
         raise InvalidRefreshTokenException(data.get('message', ''))
     if data.get('status', 200) == 401:
         raise UnauthorizedException(data.get('message', ''))
-    return data['access_token'], data['refresh_token']
+    if expires_in:
+        return data['access_token'], data['refresh_token'], data['expires_in']
+    else: 
+        return data['access_token'], data['refresh_token']
 
 
 async def validate_token(access_token: str,
