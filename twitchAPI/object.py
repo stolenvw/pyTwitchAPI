@@ -12,7 +12,7 @@ from dateutil import parser as du_parser
 
 from twitchAPI.helper import build_url
 from twitchAPI.types import StatusCode, VideoType, HypeTrainContributionMethod, DropsEntitlementFulfillmentStatus, CustomRewardRedemptionStatus, \
-    PollStatus, PredictionStatus, SoundtrackSourceType
+    PollStatus, PredictionStatus
 
 T = TypeVar('T')
 
@@ -27,9 +27,9 @@ __all__ = ['TwitchObject', 'IterTwitchObject', 'AsyncIterTwitchObject', 'TwitchU
            'PartialCustomReward', 'CustomRewardRedemption', 'ChannelEditor', 'BlockListEntry', 'PollChoice', 'Poll', 'Predictor', 'PredictionOutcome',
            'Prediction', 'RaidStartResult', 'ChatBadgeVersion', 'ChatBadge', 'Emote', 'GetEmotesResponse', 'EventSubSubscription',
            'GetEventSubSubscriptionResult', 'StreamCategory', 'ChannelStreamScheduleSegment', 'StreamVacation', 'ChannelStreamSchedule',
-           'ChannelVIP', 'UserChatColor', 'Artist', 'Album', 'Soundtrack', 'TrackSource', 'CurrentSoundtrack', 'Playlist', 'Chatter',
-           'GetChattersResponse', 'ShieldModeStatus', 'CharityAmount', 'CharityCampaign', 'CharityCampaignDonation', 'AutoModSettings',
-           'ChannelFollower', 'ChannelFollowersResult', 'FollowedChannel', 'FollowedChannelsResult']
+           'ChannelVIP', 'UserChatColor', 'Chatter', 'GetChattersResponse', 'ShieldModeStatus', 'CharityAmount', 'CharityCampaign',
+           'CharityCampaignDonation', 'AutoModSettings', 'ChannelFollower', 'ChannelFollowersResult', 'FollowedChannel', 'FollowedChannelsResult',
+           'ContentClassificationLabel']
 
 
 class TwitchObject:
@@ -173,6 +173,10 @@ class AsyncIterTwitchObject(TwitchObject, Generic[T]):
 
     def __aiter__(self):
         return self
+
+    def current_cursor(self) -> Optional[str]:
+        """Provides the currently used forward pagination cursor"""
+        return self._data['param'].get('after')
 
     async def __anext__(self) -> T:
         if not hasattr(self, self._data['iter_field']) or not isinstance(self.__getattribute__(self._data['iter_field']), list):
@@ -580,6 +584,8 @@ class ChannelInformation(TwitchObject):
     title: str
     delay: int
     tags: List[str]
+    content_classification_labels: List[str]
+    is_branded_content: bool
 
 
 class SearchChannelResult(ChannelInformation):
@@ -878,48 +884,6 @@ class UserChatColor(TwitchObject):
     color: str
 
 
-class Artist(TwitchObject):
-    id: str
-    name: str
-    creator_channel_id: str
-
-
-class Album(TwitchObject):
-    id: str
-    name: str
-    image_url: str
-
-
-class Soundtrack(TwitchObject):
-    artists: List[Artist]
-    id: str
-    isrc: str
-    duration: int
-    title: str
-    album: Album
-
-
-class TrackSource(TwitchObject):
-    content_type: SoundtrackSourceType
-    id: str
-    image_url: str
-    soundtrack_url: str
-    spotify_url: str
-    title: str
-
-
-class CurrentSoundtrack(TwitchObject):
-    track: Soundtrack
-    source: TrackSource
-
-
-class Playlist(TwitchObject):
-    title: str
-    id: str
-    image_url: str
-    description: str
-
-
 class Chatter(TwitchObject):
     user_id: str
     user_login: str
@@ -979,3 +943,9 @@ class AutoModSettings(TwitchObject):
     swearing: int
     race_ethnicity_or_religion: int
     sex_based_terms: int
+
+
+class ContentClassificationLabel(TwitchObject):
+    id: str
+    description: str
+    name: str

@@ -271,12 +271,18 @@ from asyncio import CancelledError
 from logging import getLogger, Logger
 from time import sleep
 import aiohttp
+
+
 from twitchAPI.twitch import Twitch
 from twitchAPI.object import TwitchUser
 from twitchAPI.helper import TWITCH_CHAT_URL, first, RateLimitBucket, RATE_LIMIT_SIZES
 from twitchAPI.types import ChatRoom, TwitchBackendException, AuthType, AuthScope, ChatEvent, UnauthorizedException
 
-from typing import List, Optional, Union, Callable, Dict, Awaitable, Any
+from typing import List, Optional, Union, Callable, Dict, Awaitable, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from twitchAPI.chat.middleware import BaseCommandMiddleware
+
 
 __all__ = ['Chat', 'ChatUser', 'EventData', 'ChatMessage', 'ChatCommand', 'ChatSub', 'ChatRoom', 'ChatEvent', 'RoomStateChangeEvent',
            'JoinEvent', 'JoinedEvent', 'LeftEvent', 'ClearChatEvent', 'WhisperEvent', 'MessageDeletedEvent', 'NoticeEvent']
@@ -319,13 +325,14 @@ class ChatUser:
 
 class EventData:
     """Represents a basic chat event"""
+
     def __init__(self, chat):
         self.chat: 'Chat' = chat
         """The :const:`twitchAPI.chat.Chat` instance"""
 
 
 class MessageDeletedEvent(EventData):
-    
+
     def __init__(self, chat, parsed):
         super(MessageDeletedEvent, self).__init__(chat)
         self._room_name = parsed['command']['channel'][1:]
@@ -362,6 +369,7 @@ class RoomStateChangeEvent(EventData):
 
 class JoinEvent(EventData):
     """"""
+
     def __init__(self, chat, channel_name, user_name):
         super(JoinEvent, self).__init__(chat)
         self._name = channel_name
@@ -387,6 +395,7 @@ class JoinedEvent(EventData):
 
 class LeftEvent(EventData):
     """When the bot or a user left a room"""
+
     def __init__(self, chat, channel_name, room, user):
         super(LeftEvent, self).__init__(chat)
         self.room_name: str = channel_name
@@ -484,7 +493,7 @@ class ChatSub:
 
 
 class ClearChatEvent(EventData):
-    
+
     def __init__(self, chat, parsed):
         super(ClearChatEvent, self).__init__(chat)
         self.room_name: str = parsed['command']['channel'][1:]
@@ -505,10 +514,10 @@ class ClearChatEvent(EventData):
     def room(self) -> Optional[ChatRoom]:
         """The room this event was issued in. None on cache miss."""
         return self.chat.room_cache.get(self.room_name)
-    
+
 
 class WhisperEvent(EventData):
-    
+
     def __init__(self, chat, parsed):
         super(WhisperEvent, self).__init__(chat)
         self._parsed = parsed
@@ -523,7 +532,7 @@ class WhisperEvent(EventData):
 
 class NoticeEvent(EventData):
     """Represents a server notice"""
-    
+
     def __init__(self, chat, parsed):
         super(NoticeEvent, self).__init__(chat)
         self._room_name = parsed['command']['channel'][1:]
@@ -537,7 +546,7 @@ class NoticeEvent(EventData):
     def room(self) -> Optional[ChatRoom]:
         """The room this notice is from"""
         return self.chat.room_cache.get(self._room_name)
-        
+
 
 COMMAND_CALLBACK_TYPE = Callable[[ChatCommand], Awaitable[None]]
 EVENT_CALLBACK_TYPE = Callable[[Any], Awaitable[None]]
@@ -594,6 +603,8 @@ class Chat:
         self._mod_status_cache = {}
         self._subscriber_status_cache = {}
         self._channel_command_prefix = {}
+        self._command_middleware: List['BaseCommandMiddleware'] = []
+        self._command_specific_middleware: Dict[str, List['BaseCommandMiddleware']] = {}
 
     def __await__(self):
         t = asyncio.create_task(self._get_username())
@@ -1024,7 +1035,7 @@ class Chat:
         for handler in self._event_handler.get(ChatEvent.ROOM_STATE_CHANGE, []):
             t = asyncio.ensure_future(handler(dat))
             t.add_done_callback(self._task_callback)
-            
+
     async def _handle_user_state(self, parsed: dict):
         self.logger.debug('got user state event')
         is_broadcaster = False
@@ -1058,8 +1069,13 @@ class Chat:
             command_name = parsed['command'].get('bot_command').lower()
             handler = self._command_handler.get(command_name)
             if handler is not None:
-                t = asyncio.ensure_future(handler(ChatCommand(self, parsed)))
-                t.add_done_callback(self._task_callback)
+                command = ChatCommand(self, parsed)
+                # check middleware
+                execute = all([await mid.can_execute(command) for mid in self._command_middleware])
+                execute = execute and all([await mid.can_execute(command) for mid in self._command_specific_middleware.get(command_name, [])])
+                if execute:
+                    t = asyncio.ensure_future(handler(command))
+                    t.add_done_callback(self._task_callback)
             else:
                 if self.log_no_registered_command_handler:
                     self.logger.info(f'no handler registered for command "{command_name}"')
@@ -1131,11 +1147,12 @@ class Chat:
                 ch = ch.name
             self._channel_command_prefix.pop(ch, None)
 
-    def register_command(self, name: str, handler: COMMAND_CALLBACK_TYPE) -> bool:
+    def register_command(self, name: str, handler: COMMAND_CALLBACK_TYPE, command_middleware: Optional[List['BaseCommandMiddleware']] = None) -> bool:
         """Register a command
 
         :param name: the name of the command
         :param handler: The event handler
+        :param command_middleware: a optional list of middleware to use just for this command
         :raises ValueError: if handler is not a coroutine"""
         if not asyncio.iscoroutinefunction(handler):
             raise ValueError('handler needs to be a async function which takes one parameter')
@@ -1143,6 +1160,8 @@ class Chat:
         if self._command_handler.get(name) is not None:
             return False
         self._command_handler[name] = handler
+        if command_middleware is not None:
+            self._command_specific_middleware[name] = command_middleware
         return True
 
     def unregister_command(self, name: str) -> bool:
@@ -1191,7 +1210,7 @@ class Chat:
     def is_ready(self) -> bool:
         """Returns True if the chat bot is ready to join channels and/or receive events"""
         return self._ready
-    
+
     def is_mod(self, room: CHATROOM_TYPE) -> bool:
         """Check if chat bot is a mod in a channel
 
@@ -1205,7 +1224,7 @@ class Chat:
         if room[0] == '#':
             room = room[1:]
         return self._mod_status_cache.get(room.lower(), 'user') == 'mod'
-    
+
     def is_subscriber(self, room: CHATROOM_TYPE) -> bool:
         """Check if chat bot is a subscriber in a channel
 
@@ -1325,3 +1344,13 @@ class Chat:
         # wait to leave all rooms
         while any([r in self._room_leave_locks for r in target]):
             await asyncio.sleep(0.01)
+
+    def register_command_middleware(self, mid: 'BaseCommandMiddleware'):
+        """Adds the given command middleware as a general middleware"""
+        if mid not in self._command_middleware:
+            self._command_middleware.append(mid)
+
+    def unregister_command_middleware(self, mid: 'BaseCommandMiddleware'):
+        """Removes the given command middleware from the general list"""
+        if mid in self._command_middleware:
+            self._command_middleware.remove(mid)

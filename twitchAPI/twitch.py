@@ -1970,7 +1970,9 @@ class Twitch:
                                          broadcaster_language: Optional[str] = None,
                                          title: Optional[str] = None,
                                          delay: Optional[int] = None,
-                                         tags: Optional[List[str]] = None) -> bool:
+                                         tags: Optional[List[str]] = None,
+                                         content_classification_labels: Optional[List[str]] = None,
+                                         is_branded_content: Optional[bool] = None) -> bool:
         """Modifies channel information for users.\n\n
 
         Requires User authentication with scope :const:`~twitchAPI.types.AuthScope.CHANNEL_MANAGE_BROADCAST`\n
@@ -1983,6 +1985,8 @@ class Twitch:
         :param delay: Stream delay in seconds. Trying to set this while not being a Twitch Partner will fail! |default| :code:`None`
         :param tags: A list of channel-defined tags to apply to the channel. To remove all tags from the channel, set tags to an empty array.
                 |default|:code:`None`
+        :param content_classification_labels: List of labels that should be set as the Channel’s CCLs.
+        :param is_branded_content: Boolean flag indicating if the channel has branded content.
         :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
         :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
         :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
@@ -1991,6 +1995,8 @@ class Twitch:
         :raises ValueError: if none of the following fields are specified: `game_id, broadcaster_language, title`
         :raises ValueError: if title is a empty string
         :raises ValueError: if tags has more than 10 entries
+        :raises ValueError: if requested a gaming CCL to channel or used Unallowed CCLs declared for underaged authorized user in a restricted country
+        :raises ValueError: if the is_branded_content flag was set too frequently
         """
         if game_id is None and broadcaster_language is None and title is None and tags is None:
             raise ValueError('You need to specify at least one of the optional parameter')
@@ -2002,9 +2008,15 @@ class Twitch:
                                   'broadcaster_language': broadcaster_language,
                                   'title': title,
                                   'delay': delay,
-                                  'tags': tags}.items() if v is not None}
+                                  'tags': tags,
+                                  'content_classification_labels': content_classification_labels,
+                                  'is_branded_content': is_branded_content}.items() if v is not None}
+        error_handler = {403: ValueError('Either requested to add gaming CCL to channel or used Unallowed CCLs declared for underaged authorized '
+                                         'user in a restricted country'),
+                         409: ValueError('tried to set is_branded_content flag too frequently')}
         return await self._build_result('PATCH', 'channels', {'broadcaster_id': broadcaster_id}, AuthType.USER,
-                                        [AuthScope.CHANNEL_MANAGE_BROADCAST], None, body_data=body, result_type=ResultType.STATUS_CODE) == 204
+                                        [AuthScope.CHANNEL_MANAGE_BROADCAST], None, body_data=body, result_type=ResultType.STATUS_CODE,
+                                        error_handler=error_handler) == 204
 
     async def search_channels(self,
                               query: str,
@@ -3602,82 +3614,6 @@ class Twitch:
                                        f'the broadcaster cant send {to_broadcaster_id} a shoutout')}
         await self._build_result('POST', 'chat/shoutouts', param, AuthType.USER, [AuthScope.MODERATOR_MANAGE_SHOUTOUTS], None, error_handler=err)
 
-    async def get_soundtrack_current_track(self, broadcaster_id: str) -> CurrentSoundtrack:
-        """Gets the Soundtrack track that the broadcaster is playing.
-
-        Requires User or App Authentication\n
-        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-soundtrack-current-track
-
-        :param broadcaster_id: The ID of the broadcaster that’s playing a Soundtrack track.
-        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
-        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
-        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
-        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
-        """
-        param = {
-            'broadcaster_id': broadcaster_id
-        }
-        return await self._build_result('GET', 'soundtrack/current_track', param, AuthType.EITHER, [], CurrentSoundtrack)
-
-    async def get_soundtrack_playlist(self,
-                                      broadcaster_id: str,
-                                      first: Optional[int] = None,
-                                      after: Optional[str] = None) -> AsyncGenerator[Soundtrack, None]:
-        """Gets the Soundtrack playlist’s tracks.
-
-        Requires User or App Authentication\n
-        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-soundtrack-playlist
-
-        :param broadcaster_id: The ID of the playlist to get.
-        :param first: The maximum number of items to return per page in the response. Between 1 and 50. |default| :code:`20`
-        :param after: The cursor used to get the next page of results.
-        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
-        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
-        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
-        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
-        :raises ValueError: if first is not between 1 and 50
-        """
-        if first is not None and (first < 1 or first > 50):
-            raise ValueError('first must be between 1 and 50')
-        param = {
-            'broadcaster_id': broadcaster_id,
-            'first': first,
-            'after': after
-        }
-        async for y in self._build_generator('GET', 'soundtrack/playlist', param, AuthType.EITHER, [], Soundtrack):
-            yield y
-
-    async def get_soundtrack_playlists(self,
-                                       playlist_id: Optional[str] = None,
-                                       first: Optional[int] = None,
-                                       after: Optional[str] = None) -> AsyncGenerator[Playlist, None]:
-        """Gets a list of Soundtrack playlists.
-
-        Requires User or App Authentication\n
-        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-soundtrack-playlists
-
-        :param playlist_id: The ID of the playlist to get. Specify an ID only if you want to get a single playlist instead of all playlists.
-        :param first: The maximum number of items to return per page in the response. Between 1 and 50. |default| :code:`20`
-        :param after: The cursor used to get the next page of results.
-        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
-        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
-        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
-        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
-        :raises ValueError: if first is not between 1 and 50
-        """
-        if first is not None and (first < 1 or first > 50):
-            raise ValueError('first must be between 1 and 50')
-        param = {
-            'id': playlist_id,
-            'first': first,
-            'after': after
-        }
-        async for y in self._build_generator('GET', 'soundtrack/playlists', param, AuthType.EITHER, [], Playlist):
-            yield y
-
     async def get_chatters(self,
                            broadcaster_id: str,
                            moderator_id: str,
@@ -3810,3 +3746,22 @@ class Twitch:
         async for y in self._build_generator('GET', 'charity/donations', param, AuthType.USER, [AuthScope.CHANNEL_READ_CHARITY],
                                              CharityCampaignDonation):
             yield y
+
+    async def get_content_classification_labels(self, locale: Optional[str] = None) -> List[ContentClassificationLabel]:
+        """Gets information about Twitch content classification labels.
+
+        Requires User or App Authentication\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-content-classification-labels
+
+        :param locale: Locale for the Content Classification Labels. |default|:code:`en-US`
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        """
+        return await self._build_result('GET',
+                                        'content_classification_labels',
+                                        {'locale': locale},
+                                        AuthType.EITHER, [],
+                                        List[ContentClassificationLabel])

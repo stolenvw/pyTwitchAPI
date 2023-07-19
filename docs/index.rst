@@ -366,6 +366,7 @@ Indices and tables
 
 * :ref:`genindex`
 * :ref:`modindex`
+* :doc:`tutorials`
 * :doc:`changelog`
 * :doc:`v3-migration`
 
@@ -377,6 +378,7 @@ Indices and tables
    twitchAPI.eventsub
    twitchAPI.pubsub
    twitchAPI.chat
+   twitchAPI.chat.middleware
    twitchAPI.oauth
    twitchAPI.types
    twitchAPI.helper
@@ -387,4 +389,5 @@ Indices and tables
    :caption: Contents:
    :hidden:
 
+   tutorials
    changelog
