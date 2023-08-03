@@ -268,6 +268,7 @@ import sys
 import threading
 import traceback
 from asyncio import CancelledError
+from functools import partial
 from logging import getLogger, Logger
 from time import sleep
 import aiohttp
@@ -275,7 +276,7 @@ import aiohttp
 
 from twitchAPI.twitch import Twitch
 from twitchAPI.object import TwitchUser
-from twitchAPI.helper import TWITCH_CHAT_URL, first, RateLimitBucket, RATE_LIMIT_SIZES
+from twitchAPI.helper import TWITCH_CHAT_URL, first, RateLimitBucket, RATE_LIMIT_SIZES, done_task_callback
 from twitchAPI.types import ChatRoom, TwitchBackendException, AuthType, AuthScope, ChatEvent, UnauthorizedException
 
 from typing import List, Optional, Union, Callable, Dict, Awaitable, Any, TYPE_CHECKING
@@ -285,7 +286,7 @@ if TYPE_CHECKING:
 
 
 __all__ = ['Chat', 'ChatUser', 'EventData', 'ChatMessage', 'ChatCommand', 'ChatSub', 'ChatRoom', 'ChatEvent', 'RoomStateChangeEvent',
-           'JoinEvent', 'JoinedEvent', 'LeftEvent', 'ClearChatEvent', 'WhisperEvent', 'MessageDeletedEvent', 'NoticeEvent']
+           'JoinEvent', 'JoinedEvent', 'LeftEvent', 'ClearChatEvent', 'WhisperEvent', 'MessageDeletedEvent', 'NoticeEvent', 'HypeChat']
 
 
 class ChatUser:
@@ -406,6 +407,26 @@ class LeftEvent(EventData):
         """the cached room state, might bo Null"""
 
 
+class HypeChat:
+
+    def __init__(self, parsed):
+        self.amount: int = int(parsed['tags'].get('pinned-chat-paid-amount'))
+        """The value of the Hype Chat sent by the user."""
+        self.currency: str = parsed['tags'].get('pinned-chat-paid-currency')
+        """The ISO 4217 alphabetic currency code the user has sent the Hype Chat in."""
+        self.exponent: int = int(parsed['tags'].get('pinned-chat-paid-exponent'))
+        """Indicates how many decimal points this currency represents partial amounts in. 
+        Decimal points start from the right side of the value defined in :const:`~twitchAPI.chat.HypeChat.amount`"""
+        self.level: str = parsed['tags'].get('pinned-chat-paid-level')
+        """The level of the Hype Chat, in English.\n
+        Possible Values are:
+        :code:`ONE`, :code:`TWO`, :code:`THREE`, :code:`FOUR`, :code:`FIVE`, :code:`SIX`, :code:`SEVEN`, :code:`EIGHT`, :code:`NINE`, :code:`TEN`"""
+        self.is_system_message: bool = parsed['tags'].get('pinned-chat-paid-is-system-message') == 1
+        """A Boolean value that determines if the message sent with the Hype Chat was filled in by the system.\n
+           If True, the user entered no message and the body message was automatically filled in by the system.\n
+           If False, the user provided their own message to send with the Hype Chat."""
+
+
 class ChatMessage(EventData):
     """Represents a chat message"""
 
@@ -432,6 +453,8 @@ class ChatMessage(EventData):
         """The emotes used in the message"""
         self.id: str = parsed['tags'].get('id')
         """the ID of the message"""
+        self.hype_chat: Optional[HypeChat] = HypeChat(parsed) if parsed['tags'].get('pinned-chat-paid-level') is not None else None
+        """Hype Chat related data, is None if the message was not a hype chat"""
 
     @property
     def room(self) -> Optional[ChatRoom]:
@@ -560,24 +583,35 @@ class Chat:
                  twitch: Twitch,
                  connection_url: Optional[str] = None,
                  is_verified_bot: bool = False,
-                 initial_channel: Optional[List[str]] = None):
+                 initial_channel: Optional[List[str]] = None,
+                 callback_loop: Optional[asyncio.AbstractEventLoop] = None):
         """
         :param twitch: A Authenticated twitch instance
         :param connection_url: alternative connection url |default|:code:`None`
         :param is_verified_bot: set to true if your bot is verified by twitch |default|:code:`False`
         :param initial_channel: List of channel which should be automatically joined on startup |default| :code:`None`
+        :param callback_loop: The asyncio eventloop to be used for callbacks. \n
+            Set this if you or a library you use cares about which asyncio event loop is running the callbacks.
+            Defaults to the one used by Chat.
         """
         self.logger: Logger = getLogger('twitchAPI.chat')
         """The logger used for Chat related log messages"""
         self._prefix: str = "!"
         self.twitch: Twitch = twitch
+        """The twitch instance being used"""
         if not self.twitch.has_required_auth(AuthType.USER, [AuthScope.CHAT_READ]):
             raise ValueError('passed twitch instance is missing User Auth.')
         self.connection_url: str = connection_url if connection_url is not None else TWITCH_CHAT_URL
+        """Alternative connection url |default|:code:`None`"""
         self.ping_frequency: int = 120
+        """Frequency in seconds for sending ping messages. This should usually not be changed."""
         self.ping_jitter: int = 4
+        """Jitter in seconds for ping messages. This should usually not be changed."""
+        self._callback_loop = callback_loop
         self.listen_confirm_timeout: int = 30
+        """Time in second that any :code:`listen_` should wait for its subscription to be completed."""
         self.reconnect_delay_steps: List[int] = [0, 1, 2, 4, 8, 16, 32, 64, 128]
+        """Time in seconds between reconnect attempts"""
         self.log_no_registered_command_handler: bool = True
         """Controls if instances of commands being issued in chat where no handler exists should be logged. |default|:code:`True`"""
         self.__connection = None
@@ -595,6 +629,7 @@ class Chat:
         self._event_handler = {}
         self._command_handler = {}
         self.room_cache: Dict[str, ChatRoom] = {}
+        """internal cache of all chat rooms the bot is currently in"""
         self._room_join_locks = []
         self._room_leave_locks = []
         self._closing: bool = False
@@ -605,6 +640,7 @@ class Chat:
         self._channel_command_prefix = {}
         self._command_middleware: List['BaseCommandMiddleware'] = []
         self._command_specific_middleware: Dict[str, List['BaseCommandMiddleware']] = {}
+        self._task_callback = partial(done_task_callback, self.logger)
 
     def __await__(self):
         t = asyncio.create_task(self._get_username())
@@ -856,6 +892,8 @@ class Chat:
 
     def __run_socket(self):
         self.__socket_loop = asyncio.new_event_loop()
+        if self._callback_loop is None:
+            self._callback_loop = self.__socket_loop
         asyncio.set_event_loop(self.__socket_loop)
 
         # startup
@@ -867,12 +905,6 @@ class Chat:
         ]
         # keep loop alive
         self.__socket_loop.run_until_complete(self._keep_loop_alive())
-
-    @staticmethod
-    def _task_callback(task: asyncio.Task):
-        e = task.exception()
-        if e is not None:
-            traceback.print_exception(type(e), e, e.__traceback__, file=sys.stderr)
 
     async def _send_message(self, message: str):
         self.logger.debug(f'> "{message}"')
@@ -942,26 +974,26 @@ class Chat:
     async def _handle_whisper(self, parsed: dict):
         e = WhisperEvent(self, parsed)
         for handler in self._event_handler.get(ChatEvent.WHISPER, []):
-            t = asyncio.ensure_future(handler(e))
+            t = asyncio.ensure_future(handler(e), loop=self._callback_loop)
             t.add_done_callback(self._task_callback)
 
     async def _handle_clear_chat(self, parsed: dict):
         e = ClearChatEvent(self, parsed)
         for handler in self._event_handler.get(ChatEvent.CHAT_CLEARED, []):
-            t = asyncio.ensure_future(handler(e))
+            t = asyncio.ensure_future(handler(e), loop=self._callback_loop)
             t.add_done_callback(self._task_callback)
 
     async def _handle_notice(self, parsed: dict):
         e = NoticeEvent(self, parsed)
         for handler in self._event_handler.get(ChatEvent.NOTICE, []):
-            t = asyncio.ensure_future(handler(e))
+            t = asyncio.ensure_future(handler(e), loop=self._callback_loop)
             t.add_done_callback(self._task_callback)
-        self.logger.debug(f'got NOTICE for channel {parsed["command"]["channel"]}: {parsed["tags"]["msg-id"]}')
+        self.logger.debug(f'got NOTICE for channel {parsed["command"]["channel"]}: {parsed["tags"].get("msg-id")}')
 
     async def _handle_clear_msg(self, parsed: dict):
         ev = MessageDeletedEvent(self, parsed)
         for handler in self._event_handler.get(ChatEvent.MESSAGE_DELETE, []):
-            t = asyncio.ensure_future(handler(ev))
+            t = asyncio.ensure_future(handler(ev), loop=self._callback_loop)
             t.add_done_callback(self._task_callback)
 
     async def _handle_cap_reply(self, parsed: dict):
@@ -978,12 +1010,12 @@ class Chat:
         if nick == self.username:
             e = JoinedEvent(self, ch, nick)
             for handler in self._event_handler.get(ChatEvent.JOINED, []):
-                t = asyncio.ensure_future(handler(e))
+                t = asyncio.ensure_future(handler(e), loop=self._callback_loop)
                 t.add_done_callback(self._task_callback)
         else:
             e = JoinEvent(self, ch, nick)
             for handler in self._event_handler.get(ChatEvent.JOIN, []):
-                t = asyncio.ensure_future(handler(e))
+                t = asyncio.ensure_future(handler(e), loop=self._callback_loop)
                 t.add_done_callback(self._task_callback)
 
     async def _handle_part(self, parsed: dict):
@@ -995,13 +1027,13 @@ class Chat:
             room = self.room_cache.pop(ch, None)
             e = LeftEvent(self, ch, room, usr)
             for handler in self._event_handler.get(ChatEvent.LEFT, []):
-                t = asyncio.ensure_future(handler(e))
+                t = asyncio.ensure_future(handler(e), loop=self._callback_loop)
                 t.add_done_callback(self._task_callback)
         else:
             room = self.room_cache.get(ch)
             e = LeftEvent(self, ch, room, usr)
             for handler in self._event_handler.get(ChatEvent.USER_LEFT, []):
-                t = asyncio.ensure_future(handler(e))
+                t = asyncio.ensure_future(handler(e), loop=self._callback_loop)
                 t.add_done_callback(self._task_callback)
 
     async def _handle_user_notice(self, parsed: dict):
@@ -1012,7 +1044,7 @@ class Chat:
         elif parsed['tags'].get('msg-id') in ('sub', 'resub', 'subgift'):
             sub = ChatSub(self, parsed)
             for handler in self._event_handler.get(ChatEvent.SUB, []):
-                t = asyncio.ensure_future(handler(sub))
+                t = asyncio.ensure_future(handler(sub), loop=self._callback_loop)
                 t.add_done_callback(self._task_callback)
 
     async def _handle_room_state(self, parsed: dict):
@@ -1033,7 +1065,7 @@ class Chat:
         self.room_cache[state.name] = state
         dat = RoomStateChangeEvent(self, prev, state)
         for handler in self._event_handler.get(ChatEvent.ROOM_STATE_CHANGE, []):
-            t = asyncio.ensure_future(handler(dat))
+            t = asyncio.ensure_future(handler(dat), loop=self._callback_loop)
             t.add_done_callback(self._task_callback)
 
     async def _handle_user_state(self, parsed: dict):
@@ -1058,9 +1090,11 @@ class Chat:
             _failed = await self.join_room(self._join_target)
             if len(_failed) > 0:
                 self.logger.warning(f'failed to join the following channel of the initial following list: {", ".join(_failed)}')
+            else:
+                self.logger.info('done joining initial channels')
         if not was_ready:
             for h in self._event_handler.get(ChatEvent.READY, []):
-                t = asyncio.ensure_future(h(dat))
+                t = asyncio.ensure_future(h(dat), loop=self._callback_loop)
                 t.add_done_callback(self._task_callback)
 
     async def _handle_msg(self, parsed: dict):
@@ -1074,7 +1108,7 @@ class Chat:
                 execute = all([await mid.can_execute(command) for mid in self._command_middleware])
                 execute = execute and all([await mid.can_execute(command) for mid in self._command_specific_middleware.get(command_name, [])])
                 if execute:
-                    t = asyncio.ensure_future(handler(command))
+                    t = asyncio.ensure_future(handler(command), loop=self._callback_loop)
                     t.add_done_callback(self._task_callback)
             else:
                 if self.log_no_registered_command_handler:
@@ -1082,7 +1116,7 @@ class Chat:
         handler = self._event_handler.get(ChatEvent.MESSAGE, [])
         message = ChatMessage(self, parsed)
         for h in handler:
-            t = asyncio.ensure_future(h(message))
+            t = asyncio.ensure_future(h(message), loop=self._callback_loop)
             t.add_done_callback(self._task_callback)
 
     async def __task_startup(self):

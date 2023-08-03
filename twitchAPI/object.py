@@ -134,7 +134,7 @@ class TwitchObject:
 
 class IterTwitchObject(TwitchObject):
     """Special type of :const:`~twitchAPI.object.TwitchObject`.
-       These usually have some list inside that you may want to dicrectly itterate over in your API usage but that also contain other usefull data
+       These usually have some list inside that you may want to directly iterate over in your API usage but that also contain other useful data
        outside of that List.
 
        Example:
@@ -154,7 +154,7 @@ class IterTwitchObject(TwitchObject):
 
 
 class AsyncIterTwitchObject(TwitchObject, Generic[T]):
-    """A few API calls will have usefull data outside of the list the pagination itterates over.
+    """A few API calls will have useful data outside the list the pagination iterates over.
        For those cases, this object exist.
 
        Example:
@@ -190,7 +190,7 @@ class AsyncIterTwitchObject(TwitchObject, Generic[T]):
             raise StopAsyncIteration()
         _url = build_url(self._data['url'], self._data['param'], remove_none=True, split_lists=self._data['split'])
         async with ClientSession() as session:
-            response = await self._data['req'](session, _url, self._data['auth_t'], self._data['auth_s'], self._data['body'])
+            response = await self._data['req'](self._data['method'], session, _url, self._data['auth_t'], self._data['auth_s'], self._data['body'])
             _data = await response.json()
         _after = _data.get('pagination', {}).get('cursor')
         self._data['param']['after'] = _after

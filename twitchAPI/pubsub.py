@@ -1,7 +1,7 @@
 #  Copyright (c) 2020. Lena "Teekeks" During <info@teawork.de>
 """
-PubSub Client
--------------
+PubSub
+------
 
 This is a full implementation of the PubSub API of twitch.
 PubSub enables you to subscribe to a topic, for updates (e.g., when a user cheers in a channel).
@@ -63,13 +63,14 @@ Class Documentation
 *******************
 """
 from asyncio import CancelledError
+from functools import partial
 
 import aiohttp
 from aiohttp import ClientSession
 
 from .twitch import Twitch
 from .types import *
-from .helper import get_uuid, make_enum, TWITCH_PUB_SUB_URL
+from .helper import get_uuid, make_enum, TWITCH_PUB_SUB_URL, done_task_callback
 import asyncio
 import threading
 import json
@@ -91,10 +92,13 @@ class PubSub:
     """The PubSub client
     """
 
-    def __init__(self, twitch: Twitch):
+    def __init__(self, twitch: Twitch, callback_loop: Optional[asyncio.AbstractEventLoop] = None):
         """
 
         :param twitch:  A authenticated Twitch instance
+        :param callback_loop: The asyncio eventloop to be used for callbacks. \n
+            Set this if you or a library you use cares about which asyncio event loop is running the callbacks.
+            Defaults to the one used by PubSub.
         """
         self.__twitch: Twitch = twitch
         self.logger: Logger = getLogger('twitchAPI.pubsub')
@@ -108,6 +112,7 @@ class PubSub:
         """maximum time in seconds waited for a listen confirm. |default| :code:`30`"""
         self.reconnect_delay_steps: List[int] = [1, 2, 4, 8, 16, 32, 64, 128]
         self.__connection = None
+        self._callback_loop = callback_loop
         self.__socket_thread: Optional[threading.Thread] = None
         self.__running: bool = False
         self.__socket_loop = None
@@ -118,6 +123,7 @@ class PubSub:
         self.__waiting_for_pong: bool = False
         self.__nonce_waiting_confirm: dict = {}
         self._closing = False
+        self._task_callback = partial(done_task_callback, self.logger)
 
     def start(self) -> None:
         """
@@ -237,6 +243,8 @@ class PubSub:
     def __run_socket(self):
         self.__socket_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.__socket_loop)
+        if self._callback_loop is None:
+            self._callback_loop = self.__socket_loop
 
         # startup
         self.__socket_loop.run_until_complete(self.__connect(is_startup=True))
@@ -358,7 +366,8 @@ class PubSub:
         msg_data = json.loads(data.get('data', {}).get('message', '{}'))
         if topic_data is not None:
             for uuid, sub in topic_data.get('subs', {}).items():
-                asyncio.ensure_future(sub(uuid, msg_data))
+                t = self._callback_loop.create_task(sub(uuid, msg_data))
+                t.add_done_callback(self._task_callback)
 
     async def __handle_auth_revoked(self, data):
         revoked_topics = data.get('data', {}).get('topics', [])
